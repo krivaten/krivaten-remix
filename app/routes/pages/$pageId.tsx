@@ -1,4 +1,4 @@
-import type { LoaderFunction } from "@remix-run/node";
+import { json, LoaderFunction } from "@remix-run/node";
 import { getDatabase, getPage, getBlocks } from "~/utils/notion.server";
 import type { MetaFunction } from "@remix-run/node";
 import { Link, useLoaderData } from "@remix-run/react";
@@ -10,21 +10,25 @@ import {
 import Text from "~/components/Text";
 
 export const loader: LoaderFunction = async ({ params }) => {
-  return Promise.all([getPage(params.pageId!), getBlocks(params.pageId!)]);
+  const result = await getStaticProps(params.pageId!);
+  return json(result.props, { headers: { "Cache-Control": "max-age=3600" } });
 };
 
 export default function PageRoute() {
-  const [page, blocks] =
-    useLoaderData<
-      [QueryDatabaseResponse["results"][number], GetBlockResponse[]]
-    >();
+  const { page, blocks } =
+    useLoaderData<Awaited<ReturnType<typeof getStaticProps>>["props"]>();
 
   return (
     <article>
       <h1>
         <Text content={getPageTitle(page)} />
+        {console.log(page)}
       </h1>
-      <section>{blocks.map((block) => renderBlock(block))}</section>
+      <section>
+        {blocks.map((block) => (
+          <Fragment key={block.id}>{renderBlock(block)}</Fragment>
+        ))}
+      </section>
     </article>
   );
 }
@@ -41,42 +45,72 @@ const renderBlock = (block: GetBlockResponse) => {
         </p>
       );
     case "heading_1":
-      return (
+      return block.has_children ? (
+        <details>
+          <summary>
+            <Text content={block[type].rich_text} />
+          </summary>
+          {renderChildren(block)}
+        </details>
+      ) : (
         <h1>
           <Text content={block[type].rich_text} />
         </h1>
       );
     case "heading_2":
-      return (
+      return block.has_children ? (
+        <details>
+          <summary>
+            <Text content={block[type].rich_text} />
+          </summary>
+          {renderChildren(block)}
+        </details>
+      ) : (
         <h2>
           <Text content={block[type].rich_text} />
         </h2>
       );
     case "heading_3":
-      return (
+      return block.has_children ? (
+        <details>
+          <summary>
+            <Text content={block[type].rich_text} />
+          </summary>
+          {renderChildren(block)}
+        </details>
+      ) : (
         <h3>
           <Text content={block[type].rich_text} />
         </h3>
       );
     case "bulleted_list_item":
+      return (
+        <li>
+          <Text content={block[type].rich_text} />
+          {block.has_children && <ul>{renderChildren(block)}</ul>}
+        </li>
+      );
     case "numbered_list_item":
       return (
         <li>
           <Text content={block[type].rich_text} />
+          {block.has_children && <ul>{renderChildren(block)}</ul>}
         </li>
       );
     case "to_do":
       return (
-        <div>
+        <li>
           <label htmlFor={id}>
             <input
               type="checkbox"
+              readOnly
               id={id}
               defaultChecked={block[type].checked}
             />{" "}
             <Text content={block[type].rich_text} />
           </label>
-        </div>
+          {block.has_children && <ul>{renderChildren(block)}</ul>}
+        </li>
       );
     case "toggle":
       return (
@@ -84,9 +118,7 @@ const renderBlock = (block: GetBlockResponse) => {
           <summary>
             <Text content={block[type].rich_text} />
           </summary>
-          {block[type].children?.map((block) => (
-            <Fragment key={block.id}>{renderBlock(block)}</Fragment>
-          ))}
+          {renderChildren(block)}
         </details>
       );
     case "child_page":
@@ -95,12 +127,38 @@ const renderBlock = (block: GetBlockResponse) => {
       const value = block[type];
       const src =
         value.type === "external" ? value.external.url : value.file.url;
-      const caption = value.caption ? value.caption[0].plain_text : "";
+      const caption = value.caption.length ? value.caption[0].plain_text : "";
       return (
         <figure>
           <img src={src} alt={caption} />
           {caption && <figcaption>{caption}</figcaption>}
         </figure>
+      );
+    case "divider":
+      return <hr />;
+    case "bookmark":
+      return (
+        <div>
+          <a href={block[type].url}>{block[type].url}</a>
+        </div>
+      );
+    case "code":
+      return (
+        <pre>
+          <Text content={block[type].rich_text} />
+        </pre>
+      );
+    case "callout":
+      return (
+        <section>
+          <Text content={block[type].rich_text} />
+        </section>
+      );
+    case "quote":
+      return (
+        <blockquote>
+          <Text content={block[type].rich_text} />
+        </blockquote>
       );
     default:
       return `❌ Unsupported block (${
@@ -109,34 +167,30 @@ const renderBlock = (block: GetBlockResponse) => {
   }
 };
 
-export const getStaticPaths = async () => {
-  const database = await getDatabase(databaseId);
-  return {
-    paths: database.map((page) => ({ params: { id: page.id } })),
-    fallback: true,
-  };
-};
+export const getStaticProps = async (pageId: string) => {
+  const [page, blocks] = await Promise.all([
+    getPage(pageId),
+    getBlocks(pageId),
+  ]);
 
-export const getStaticProps = async (context) => {
-  const { id } = context.params;
-  const page = await getPage(id);
-  const blocks = await getBlocks(id);
   // Retrieve block children for nested blocks (one level deep), for example toggle blocks
   // https://developers.notion.com/docs/working-with-page-content#reading-nested-blocks
   const childBlocks = await Promise.all(
     blocks
-      .filter((block) => block.has_children)
-      .map(async (block) => {
-        return {
-          id: block.id,
-          children: await getBlocks(block.id),
-        };
-      })
+      .filter((block) => "has_children" in block && block.has_children)
+      .map(async ({ id }) => ({
+        id,
+        children: await getBlocks(id),
+      }))
   );
+
   const blocksWithChildren = blocks.map((block) => {
-    // Add child blocks if the block should contain children but none exists
-    if (block.has_children && !block[block.type].children) {
-      block[block.type]["children"] = childBlocks.find(
+    if (
+      "has_children" in block &&
+      block.has_children &&
+      !(block as IBlockWithChildren).children
+    ) {
+      (block as IBlockWithChildren).children = childBlocks.find(
         (x) => x.id === block.id
       )?.children;
     }
@@ -149,4 +203,17 @@ export const getStaticProps = async (context) => {
     },
     revalidate: 1,
   };
+};
+interface IBlockWithChildren {
+  has_children: boolean;
+  children?: GetBlockResponse[];
+}
+export const isPartialResponse = (block: GetBlockResponse) =>
+  !("has_children" in block);
+
+export const renderChildren = (block: IBlockWithChildren) => {
+  const { children = [] } = block;
+  return children.map((block: GetBlockResponse) => (
+    <Fragment key={block.id}>{renderBlock(block)}</Fragment>
+  ));
 };

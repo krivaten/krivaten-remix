@@ -1,23 +1,6 @@
 import { QueryDatabaseResponse } from "@notionhq/client/build/src/api-endpoints";
 import { IRichTextItemResponse } from "~/types";
 
-const createEmptyRichTextItem = () => {
-  return {
-    text: {
-      content: "",
-      link: null,
-    },
-    annotations: {
-      bold: false,
-      italic: false,
-      strikethrough: false,
-      underline: false,
-      code: false,
-      color: "default",
-    },
-    plain_text: "",
-  };
-};
 export const getPageTitle = (
   product: QueryDatabaseResponse["results"][number]
 ): IRichTextItemResponse[] => {
